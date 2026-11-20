@@ -896,7 +896,12 @@ func (jwtPlugin *JwtPlugin) CheckOpa(request *http.Request, token *JWT, tokenErr
 			if err = json.Unmarshal(rawVal, &value); err != nil {
 				value = string(rawVal)
 			}
-			rw.Header().Set(k, value)
+			if http.CanonicalHeaderKey(k) == "Set-Cookie" {
+				// A cookie is added: one an earlier middleware put on the response stays.
+				rw.Header().Add(k, value)
+			} else {
+				rw.Header().Set(k, value)
+			}
 		}
 	}
 

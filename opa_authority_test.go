@@ -365,3 +365,32 @@ func TestRequestOfAServiceWithoutRulesCarriesNone(t *testing.T) {
 		t.Fatalf("OPA received rules %v from a middleware that has none", rules)
 	}
 }
+
+// A cookie OPA sets is added to the cookies of the response: one an earlier middleware put there, such as a login
+// plugin's refreshed session, stays. It reaches the response of a request that passes, too.
+func TestOpaCookieIsAddedToTheCookiesOfTheResponse(t *testing.T) {
+	opa := opaAnswering(t, `{ "allow": true, "set_cookie": "policy-asked=; Max-Age=0; Path=/" }`)
+	cfg := &Config{
+		OpaUrl: opa.URL, OpaAllowField: "allow",
+		OpaResponseHeaders: map[string]string{"Set-Cookie": "set_cookie"},
+	}
+	reached := false
+	next := http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) { reached = true })
+	plugin, err := New(context.Background(), next, cfg, "test-traefik-jwt-plugin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := httptest.NewRecorder()
+	recorder.Header().Add("Set-Cookie", "session=refreshed; Path=/")
+
+	plugin.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "http://localhost/", nil))
+
+	if !reached {
+		t.Fatal("the request did not pass")
+	}
+	got := recorder.Result().Header.Values("Set-Cookie")
+	want := []string{"session=refreshed; Path=/", "policy-asked=; Max-Age=0; Path=/"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("the cookies are %q, expected %q", got, want)
+	}
+}
