@@ -126,6 +126,25 @@ type Config struct {
 	// headers OpaResponseHeaders set (Content-Type among them); otherwise
 	// the body is the plugin's own text.
 	OpaBodyField string
+
+	// Rules are the rules of the service this middleware is on. The plugin
+	// does not read them: it passes them to OPA with every request, as
+	// input.rules, and OPA's policy decides by them. A service so declares
+	// what it requires in its own Traefik configuration: an object on a
+	// cluster, labels on the service in docker.
+	Rules []Rule
+}
+
+// Rule is one rule of a service, as OPA's policy reads it: the paths and
+// methods it is for, who it lets pass, and what a request that does not pass
+// gets. Its meaning is the policy's; the names here are what OPA receives.
+type Rule struct {
+	Paths   []string `json:"paths,omitempty"`
+	Methods []string `json:"methods,omitempty"`
+	Public  bool     `json:"public,omitempty"`
+	Scopes  []string `json:"scopes,omitempty"`
+	Any     []string `json:"any,omitempty"`
+	Missing string   `json:"missing,omitempty"`
 }
 
 // CreateConfig creates a new OPA Config
@@ -156,6 +175,7 @@ type JwtPlugin struct {
 	opaDecidesToken    bool
 	opaBodyField       string
 	opaClient          *http.Client
+	rules              []Rule
 
 	name         string
 	forceRefresh bool
@@ -236,6 +256,7 @@ type PayloadInput struct {
 	JWTHeader  JwtHeader              `json:"tokenHeader"`
 	JWTPayload map[string]interface{} `json:"tokenPayload"`
 	TokenError string                 `json:"tokenError,omitempty"`
+	Rules      []Rule                 `json:"rules,omitempty"`
 	Body       interface{}            `json:"body,omitempty"`
 	Form       url.Values             `json:"form,omitempty"`
 }
@@ -269,6 +290,7 @@ func New(ctx context.Context, next http.Handler, config *Config, pluginName stri
 		aud:                config.Aud,
 		opaDecidesToken:    config.OpaDecidesToken,
 		opaBodyField:       config.OpaBodyField,
+		rules:              config.Rules,
 		opaClient:          &http.Client{Timeout: time.Duration(config.OpaTimeoutMs) * time.Millisecond},
 		name:               pluginName,
 		forceRefresh:       config.ForceRefreshKeys,
@@ -837,6 +859,7 @@ func (jwtPlugin *JwtPlugin) CheckOpa(request *http.Request, token *JWT, tokenErr
 		opaPayload.Input.JWTPayload = token.Payload
 	}
 	opaPayload.Input.TokenError = tokenError
+	opaPayload.Input.Rules = jwtPlugin.rules
 	authPayloadAsJSON, err := json.Marshal(opaPayload)
 	if err != nil {
 		return 0, err

@@ -315,3 +315,53 @@ func TestOpaDecidesTokenNeedsAnOpa(t *testing.T) {
 		t.Fatalf("the answer is %d, expected the plugin's 403", resp.StatusCode)
 	}
 }
+
+// The rules of the service a middleware is on are its own configuration: the plugin passes them to OPA unread.
+func TestRulesOfTheServiceReachOpa(t *testing.T) {
+	var input map[string]interface{}
+	opa := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload map[string]map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Error(err)
+		}
+		input = payload["input"]
+		_, _ = fmt.Fprint(w, `{ "result": { "allow": true } }`)
+	}))
+	defer opa.Close()
+	cfg := &Config{OpaUrl: opa.URL, OpaAllowField: "allow", Rules: []Rule{
+		{Paths: []string{"/open/**"}, Public: true},
+		{Paths: []string{"/reports/**"}, Methods: []string{"GET"}, Scopes: []string{"reports.read"}, Missing: "login"},
+		{Paths: []string{"/either/**"}, Any: []string{"a", "b"}},
+	}}
+
+	serve(t, cfg, httptest.NewRequest(http.MethodGet, "http://localhost/", nil))
+
+	expected := []interface{}{
+		map[string]interface{}{"paths": []interface{}{"/open/**"}, "public": true},
+		map[string]interface{}{"paths": []interface{}{"/reports/**"}, "methods": []interface{}{"GET"}, "scopes": []interface{}{"reports.read"}, "missing": "login"},
+		map[string]interface{}{"paths": []interface{}{"/either/**"}, "any": []interface{}{"a", "b"}},
+	}
+	if !reflect.DeepEqual(input["rules"], expected) {
+		t.Fatalf("OPA received the rules %v, expected %v", input["rules"], expected)
+	}
+}
+
+func TestRequestOfAServiceWithoutRulesCarriesNone(t *testing.T) {
+	var input map[string]interface{}
+	opa := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload map[string]map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Error(err)
+		}
+		input = payload["input"]
+		_, _ = fmt.Fprint(w, `{ "result": { "allow": true } }`)
+	}))
+	defer opa.Close()
+	cfg := &Config{OpaUrl: opa.URL, OpaAllowField: "allow"}
+
+	serve(t, cfg, httptest.NewRequest(http.MethodGet, "http://localhost/", nil))
+
+	if rules, sent := input["rules"]; sent {
+		t.Fatalf("OPA received rules %v from a middleware that has none", rules)
+	}
+}
