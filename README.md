@@ -1,7 +1,10 @@
-# traefik-jwt-plugin ![Build](https://github.com/traefik-plugins/traefik-jwt-plugin/actions/workflows/build.yaml/badge.svg)
+# traefik-jwt-plugin ![Build](https://github.com/paulbalomiri/traefik-jwt-plugin/actions/workflows/build.yaml/badge.svg)
 
-> [!IMPORTANT]
-> This project is looking for maintainers. Please comment in [this issue](https://github.com/traefik-plugins/traefik-jwt-plugin/issues/82)
+> [!NOTE]
+> This is a fork of [traefik-plugins/traefik-jwt-plugin](https://github.com/traefik-plugins/traefik-jwt-plugin), which has
+> no maintainer. It is kept as a pure Go plugin: no dependencies, no build tooling besides Go, a release is a tag. On
+> top of upstream it makes OPA the authority for the whole answer: see `OpaDecidesToken`, `OpaTimeoutMs` and
+> `OpaBodyField` below.
 
 Traefik plugin for verifying JSON Web Tokens (JWT). Supports public keys, certificates or JWKS endpoints.
 Supports RSA, ECDSA and symmetric keys. Supports Open Policy Agent (OPA) for additional authorization checks.
@@ -29,16 +32,16 @@ The following snippet should be added to `values.yaml`:
 experimental:
   plugins:
     jwt:
-      moduleName: github.com/traefik-plugins/traefik-jwt-plugin
-      version: v0.7.1
+      moduleName: github.com/paulbalomiri/traefik-jwt-plugin
+      version: v0.11.0
 ```
 
 ### Command line
 
 ```sh
 traefik \
-  --experimental.plugins.jwt.moduleName=github.com/traefik-plugins/traefik-jwt-plugin \
-  --experimental.plugins.jwt.version=v0.7.1
+  --experimental.plugins.jwt.moduleName=github.com/paulbalomiri/traefik-jwt-plugin \
+  --experimental.plugins.jwt.version=v0.11.0
 ```
 
 ## Configuration
@@ -59,9 +62,12 @@ JwksFetchTimeoutSecs | Timeout in seconds for JWKS endpoint HTTP requests, and f
 Alg | Used to verify which PKI algorithm is used in the JWT.
 JwksHeaders | Map used to add headers to a JWKS request (e.g. credentials for a 3rd party JWKS service).
 JwtHeaders | Map used to inject JWT payload fields as HTTP request headers.
-OpaHeaders | Map used to inject OPA result fields as HTTP request headers. Populated if request is allowed by OPA. Only 1st level keys from OPA document are supported.
+OpaHeaders | Map used to inject OPA result fields as HTTP request headers. Populated if request is allowed by OPA. Only 1st level keys from OPA document are supported. A header named here is OPA's alone: the caller's value is replaced, and removed where the result lacks the field.
 OpaResponseHeaders | Map used to inject OPA result fields as HTTP response headers. Populated if OPA response has `OpaAllowField` present, regardless of value. Only 1st level keys from OPA document are supported.
 OpaHttpStatusField | Field in OPA JSON result, which contains int or string HTTP status code that will be returned in case of disallowed OPA response. Accepted range is >= 300 and < 600. Only 1st level keys from OPA document are supported.
+OpaBodyField | Field in OPA JSON result which contains the body of the response in case of disallowed OPA response, as a string. Set its `Content-Type` with `OpaResponseHeaders`. Where the result lacks the field the body is `forbidden`.
+OpaDecidesToken | Boolean. A token that fails its checks (signature, expiry, required fields, audience) is not refused by the plugin: the request reaches OPA without `tokenPayload` and with the reason as `tokenError`, and OPA answers. Needs `OpaUrl`. Default `false`.
+OpaTimeoutMs | Timeout in milliseconds for the request to OPA. Default `0` (no timeout). A request that gets no decision from OPA — no answer in time, OPA unreachable, a result without `OpaAllowField` — is answered `503`.
 JwtCookieKey | (Deprecated, use JwtSources)Name of the cookie to extract JWT if not found in `Authorization` header.
 JwtQueryKey | (Deprecated, use JwtSources) Name of the query parameter to extract JWT if not found in `Authorization` header or in the specified cookie.
 JwtSources | Ordered List of sources [bearer, header, query, cookie] of the JWT. config format is a list of maps e.g. [{type: bearer, key: Authorization}, {type: query, key, jwt}]
@@ -125,7 +131,7 @@ metadata:
 
 The following section describes how to use this plugin with Open Policy Agent (OPA)
 
-![OPA diagram](http://www.plantuml.com/plantuml/proxy?cache=no&src=https://raw.githubusercontent.com/traefik-plugins/traefik-jwt-plugin/main/opa.puml)
+![OPA diagram](http://www.plantuml.com/plantuml/proxy?cache=no&src=https://raw.githubusercontent.com/paulbalomiri/traefik-jwt-plugin/main/opa.puml)
 
 ### OPA input payload
 
