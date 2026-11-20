@@ -109,6 +109,23 @@ type Config struct {
 	// refresh before continuing with the currently cached keys; 0 (the
 	// default) means no timeout.
 	JwksFetchTimeoutSecs int
+
+	// OpaDecidesToken leaves a token that fails its checks (signature,
+	// expiry, required fields, audience) to OPA: the request reaches OPA
+	// without the token's claims and with the reason as tokenError, and OPA
+	// answers. Off (the default), the plugin refuses such a request itself.
+	OpaDecidesToken bool
+
+	// OpaTimeoutMs ends the call to OPA after that many milliseconds; 0 (the
+	// default) means no timeout. A call that ends without a decision is
+	// answered 503.
+	OpaTimeoutMs int
+
+	// OpaBodyField names the field of the OPA result that holds the body of
+	// a denial. Where the result has it, it is the response's body, with the
+	// headers OpaResponseHeaders set (Content-Type among them); otherwise
+	// the body is the plugin's own text.
+	OpaBodyField string
 }
 
 // CreateConfig creates a new OPA Config
@@ -136,6 +153,9 @@ type JwtPlugin struct {
 	opaHttpStatusField string
 	jwtSources         []map[string]string
 	aud                string
+	opaDecidesToken    bool
+	opaBodyField       string
+	opaClient          *http.Client
 
 	name         string
 	forceRefresh bool
@@ -215,6 +235,7 @@ type PayloadInput struct {
 	Headers    map[string][]string    `json:"headers"`
 	JWTHeader  JwtHeader              `json:"tokenHeader"`
 	JWTPayload map[string]interface{} `json:"tokenPayload"`
+	TokenError string                 `json:"tokenError,omitempty"`
 	Body       interface{}            `json:"body,omitempty"`
 	Form       url.Values             `json:"form,omitempty"`
 }
@@ -246,6 +267,9 @@ func New(ctx context.Context, next http.Handler, config *Config, pluginName stri
 		opaHttpStatusField: config.OpaHttpStatusField,
 		jwtSources:         config.JwtSources,
 		aud:                config.Aud,
+		opaDecidesToken:    config.OpaDecidesToken,
+		opaBodyField:       config.OpaBodyField,
+		opaClient:          &http.Client{Timeout: time.Duration(config.OpaTimeoutMs) * time.Millisecond},
 		name:               pluginName,
 		forceRefresh:       config.ForceRefreshKeys,
 	}
@@ -467,14 +491,28 @@ func (r *keyRegistry) FetchKeys() {
 
 func (jwtPlugin *JwtPlugin) ServeHTTP(rw http.ResponseWriter, request *http.Request) {
 	if st, err := jwtPlugin.CheckToken(request, rw); err != nil {
-		if st >= 300 && st < 600 {
-			http.Error(rw, err.Error(), st)
-		} else {
-			http.Error(rw, err.Error(), http.StatusForbidden)
+		if st < 300 || st >= 600 {
+			st = http.StatusForbidden
 		}
+		if denial, ok := err.(*opaDenial); ok && denial.body != nil {
+			rw.WriteHeader(st)
+			_, _ = io.WriteString(rw, *denial.body)
+			return
+		}
+		http.Error(rw, err.Error(), st)
 		return
 	}
 	jwtPlugin.next.ServeHTTP(rw, request)
+}
+
+// opaDenial is a refusal OPA decided, with the body the decision gave for it, if any.
+type opaDenial struct {
+	text string
+	body *string
+}
+
+func (denial *opaDenial) Error() string {
+	return denial.text
 }
 
 func (jwtPlugin *JwtPlugin) CheckToken(request *http.Request, rw http.ResponseWriter) (int, error) {
@@ -491,86 +529,19 @@ func (jwtPlugin *JwtPlugin) CheckToken(request *http.Request, rw http.ResponseWr
 	}
 
 	sub := ""
+	tokenError := ""
 	if jwtToken != nil {
 		sub = fmt.Sprint(jwtToken.Payload["sub"])
-		// only verify jwt tokens if keys are configured
-		if len(jwtPlugin.registry.getKeysSync()) > 0 || len(jwtPlugin.registry.jwkEndpoints) > 0 {
-			if err = jwtPlugin.VerifyToken(jwtToken); err != nil {
-				logError(fmt.Sprintf("Token is invalid - err: %s", err.Error())).
-					withSub(sub).
-					withUrl(request.URL.String()).
-					withNetwork(jwtPlugin.remoteAddr(request)).
-					print()
+		if err = jwtPlugin.validateToken(request, jwtToken, sub); err != nil {
+			if !jwtPlugin.opaDecidesToken || jwtPlugin.opaUrl == "" {
 				return 0, err
 			}
+			// OPA answers for this request: it sees no claims, and the reason
+			tokenError = err.Error()
+			jwtToken = nil
 		}
-		for _, fieldName := range jwtPlugin.payloadFields {
-			_, ok := jwtToken.Payload[fieldName]
-			if !ok {
-				logError(fmt.Sprintf("Missing JWT field %s", fieldName)).
-					withSub(sub).
-					withUrl(request.URL.String()).
-					withNetwork(jwtPlugin.remoteAddr(request)).
-					print()
-				return 0, fmt.Errorf("payload missing required field %s", fieldName)
-			}
-			if fieldName == "exp" {
-				if expInt, err := strconv.ParseInt(fmt.Sprint(jwtToken.Payload["exp"]), 10, 64); err != nil || expInt < time.Now().Unix() {
-					logError("Token is expired").
-						withSub(sub).
-						withUrl(request.URL.String()).
-						withNetwork(jwtPlugin.remoteAddr(request)).
-						print()
-					return 0, fmt.Errorf("token is expired")
-				}
-			} else if fieldName == "nbf" {
-				if nbfInt, err := strconv.ParseInt(fmt.Sprint(jwtToken.Payload["nbf"]), 10, 64); err != nil || nbfInt > time.Now().Add(1*time.Minute).Unix() {
-					logError("Token not valid yet").
-						withSub(sub).
-						withUrl(request.URL.String()).
-						withNetwork(jwtPlugin.remoteAddr(request)).
-						print()
-					return 0, fmt.Errorf("token not valid yet")
-				}
-			}
-			if fieldName == "aud" && jwtPlugin.aud != "" {
-				audValue := jwtToken.Payload["aud"]
-				switch v := audValue.(type) {
-				case string:
-					if v != jwtPlugin.aud {
-						logError(fmt.Sprintf("Token audience mismatch, expected %s got %s", jwtPlugin.aud, v)).
-							withSub(sub).
-							withUrl(request.URL.String()).
-							withNetwork(jwtPlugin.remoteAddr(request)).
-							print()
-						return 0, fmt.Errorf("token audience mismatch")
-					}
-				case []interface{}:
-					found := false
-					for _, a := range v {
-						if aStr, ok := a.(string); ok && aStr == jwtPlugin.aud {
-							found = true
-							break
-						}
-					}
-					if !found {
-						logError(fmt.Sprintf("Token audience not found in list, expected %s", jwtPlugin.aud)).
-							withSub(sub).
-							withUrl(request.URL.String()).
-							withNetwork(jwtPlugin.remoteAddr(request)).
-							print()
-						return 0, fmt.Errorf("token audience not found in list")
-					}
-				default:
-					logError("Token audience has invalid type").
-						withSub(sub).
-						withUrl(request.URL.String()).
-						withNetwork(jwtPlugin.remoteAddr(request)).
-						print()
-					return 0, fmt.Errorf("token audience has invalid type")
-				}
-			}
-		}
+	}
+	if jwtToken != nil {
 		for k, v := range jwtPlugin.jwtHeaders {
 			_, ok := jwtToken.Payload[v]
 			if ok {
@@ -579,7 +550,7 @@ func (jwtPlugin *JwtPlugin) CheckToken(request *http.Request, rw http.ResponseWr
 		}
 	}
 	if jwtPlugin.opaUrl != "" {
-		if st, err := jwtPlugin.CheckOpa(request, jwtToken, rw); err != nil {
+		if st, err := jwtPlugin.CheckOpa(request, jwtToken, tokenError, rw); err != nil {
 			logError(fmt.Sprintf("OPA Check failed - err: %s", err.Error())).
 				withSub(sub).
 				withUrl(request.URL.String()).
@@ -589,6 +560,89 @@ func (jwtPlugin *JwtPlugin) CheckToken(request *http.Request, rw http.ResponseWr
 		}
 	}
 	return 0, nil
+}
+
+// validateToken checks the token's signature (where keys are configured) and its required fields.
+func (jwtPlugin *JwtPlugin) validateToken(request *http.Request, jwtToken *JWT, sub string) error {
+	// only verify jwt tokens if keys are configured
+	if len(jwtPlugin.registry.getKeysSync()) > 0 || len(jwtPlugin.registry.jwkEndpoints) > 0 {
+		if err := jwtPlugin.VerifyToken(jwtToken); err != nil {
+			logError(fmt.Sprintf("Token is invalid - err: %s", err.Error())).
+				withSub(sub).
+				withUrl(request.URL.String()).
+				withNetwork(jwtPlugin.remoteAddr(request)).
+				print()
+			return err
+		}
+	}
+	for _, fieldName := range jwtPlugin.payloadFields {
+		_, ok := jwtToken.Payload[fieldName]
+		if !ok {
+			logError(fmt.Sprintf("Missing JWT field %s", fieldName)).
+				withSub(sub).
+				withUrl(request.URL.String()).
+				withNetwork(jwtPlugin.remoteAddr(request)).
+				print()
+			return fmt.Errorf("payload missing required field %s", fieldName)
+		}
+		if fieldName == "exp" {
+			if expInt, err := strconv.ParseInt(fmt.Sprint(jwtToken.Payload["exp"]), 10, 64); err != nil || expInt < time.Now().Unix() {
+				logError("Token is expired").
+					withSub(sub).
+					withUrl(request.URL.String()).
+					withNetwork(jwtPlugin.remoteAddr(request)).
+					print()
+				return fmt.Errorf("token is expired")
+			}
+		} else if fieldName == "nbf" {
+			if nbfInt, err := strconv.ParseInt(fmt.Sprint(jwtToken.Payload["nbf"]), 10, 64); err != nil || nbfInt > time.Now().Add(1*time.Minute).Unix() {
+				logError("Token not valid yet").
+					withSub(sub).
+					withUrl(request.URL.String()).
+					withNetwork(jwtPlugin.remoteAddr(request)).
+					print()
+				return fmt.Errorf("token not valid yet")
+			}
+		}
+		if fieldName == "aud" && jwtPlugin.aud != "" {
+			audValue := jwtToken.Payload["aud"]
+			switch v := audValue.(type) {
+			case string:
+				if v != jwtPlugin.aud {
+					logError(fmt.Sprintf("Token audience mismatch, expected %s got %s", jwtPlugin.aud, v)).
+						withSub(sub).
+						withUrl(request.URL.String()).
+						withNetwork(jwtPlugin.remoteAddr(request)).
+						print()
+					return fmt.Errorf("token audience mismatch")
+				}
+			case []interface{}:
+				found := false
+				for _, a := range v {
+					if aStr, ok := a.(string); ok && aStr == jwtPlugin.aud {
+						found = true
+						break
+					}
+				}
+				if !found {
+					logError(fmt.Sprintf("Token audience not found in list, expected %s", jwtPlugin.aud)).
+						withSub(sub).
+						withUrl(request.URL.String()).
+						withNetwork(jwtPlugin.remoteAddr(request)).
+						print()
+					return fmt.Errorf("token audience not found in list")
+				}
+			default:
+				logError("Token audience has invalid type").
+					withSub(sub).
+					withUrl(request.URL.String()).
+					withNetwork(jwtPlugin.remoteAddr(request)).
+					print()
+				return fmt.Errorf("token audience has invalid type")
+			}
+		}
+	}
+	return nil
 }
 
 func (jwtPlugin *JwtPlugin) ExtractToken(request *http.Request) (*JWT, error) {
@@ -773,7 +827,7 @@ func (jwtPlugin *JwtPlugin) VerifyToken(jwtToken *JWT) error {
 	}
 }
 
-func (jwtPlugin *JwtPlugin) CheckOpa(request *http.Request, token *JWT, rw http.ResponseWriter) (int, error) {
+func (jwtPlugin *JwtPlugin) CheckOpa(request *http.Request, token *JWT, tokenError string, rw http.ResponseWriter) (int, error) {
 	opaPayload, err := toOPAPayload(request, jwtPlugin.opaBody)
 	if err != nil {
 		return 0, err
@@ -782,29 +836,36 @@ func (jwtPlugin *JwtPlugin) CheckOpa(request *http.Request, token *JWT, rw http.
 		opaPayload.Input.JWTHeader = token.Header
 		opaPayload.Input.JWTPayload = token.Payload
 	}
+	opaPayload.Input.TokenError = tokenError
 	authPayloadAsJSON, err := json.Marshal(opaPayload)
 	if err != nil {
 		return 0, err
 	}
-	authResponse, err := http.Post(jwtPlugin.opaUrl, "application/json", bytes.NewBuffer(authPayloadAsJSON))
+	// From here on an error means OPA gave no decision: the answer is 503, never a pass.
+	authResponse, err := jwtPlugin.opaClient.Post(jwtPlugin.opaUrl, "application/json", bytes.NewBuffer(authPayloadAsJSON))
 	if err != nil {
-		return 0, err
+		return http.StatusServiceUnavailable, err
 	}
+	defer authResponse.Body.Close()
 	body, err := io.ReadAll(authResponse.Body)
 	if err != nil {
-		return 0, err
+		return http.StatusServiceUnavailable, err
 	}
 	var result Response
 	err = json.Unmarshal(body, &result)
 	if err != nil {
-		return 0, err
+		return http.StatusServiceUnavailable, err
 	}
 	if len(result.Result) == 0 {
-		return 0, fmt.Errorf("OPA result invalid")
+		return http.StatusServiceUnavailable, fmt.Errorf("OPA result invalid")
 	}
 	fieldResult, ok := result.Result[jwtPlugin.opaAllowField]
 	if !ok {
-		return 0, fmt.Errorf("OPA result missing: %v", jwtPlugin.opaAllowField)
+		return http.StatusServiceUnavailable, fmt.Errorf("OPA result missing: %v", jwtPlugin.opaAllowField)
+	}
+	var allow bool
+	if err = json.Unmarshal(fieldResult, &allow); err != nil {
+		return http.StatusServiceUnavailable, err
 	}
 	for k, v := range jwtPlugin.opaResponseHeaders {
 		var value string
@@ -816,35 +877,38 @@ func (jwtPlugin *JwtPlugin) CheckOpa(request *http.Request, token *JWT, rw http.
 		}
 	}
 
-	var allow bool
-	if err = json.Unmarshal(fieldResult, &allow); err != nil {
-		return 0, err
-	}
-
 	if !allow {
-		var notAllowErr error
+		denial := &opaDenial{text: "forbidden"}
 		if jwtPlugin.opaDebugMode {
-			notAllowErr = fmt.Errorf("%s", body)
-		} else {
-			notAllowErr = fmt.Errorf("forbidden")
+			denial.text = string(body)
+		}
+		if jwtPlugin.opaBodyField != "" {
+			if rawVal, rawValOk := result.Result[jwtPlugin.opaBodyField]; rawValOk {
+				var text string
+				if err = json.Unmarshal(rawVal, &text); err == nil {
+					denial.body = &text
+				}
+			}
 		}
 		if jwtPlugin.opaHttpStatusField != "" {
 			if rawVal, rawValOk := result.Result[jwtPlugin.opaHttpStatusField]; rawValOk {
 				if st, err := strconv.Atoi(strings.Trim(string(rawVal), `"`)); err == nil {
-					return st, notAllowErr
+					return st, denial
 				}
 			}
 		}
-		return 0, notAllowErr
+		return 0, denial
 	}
 
+	// A header OPA sets replaces the caller's; one the decision lacks does not reach the upstream.
 	for k, v := range jwtPlugin.opaHeaders {
+		request.Header.Del(k)
 		var value string
 		if rawVal, rawValOk := result.Result[v]; rawValOk {
 			if err = json.Unmarshal(rawVal, &value); err != nil {
 				value = string(rawVal)
 			}
-			request.Header.Add(k, value)
+			request.Header.Set(k, value)
 		}
 	}
 	return 0, nil
@@ -868,7 +932,7 @@ func toOPAPayload(request *http.Request, includeBody bool) (*Payload, error) {
 				if err != nil {
 					return nil, err
 				}
-			} else if contentType == "application/x-www-url-formencoded" {
+			} else if contentType == "application/x-www-form-urlencoded" {
 				input.Form, err = url.ParseQuery(string(save))
 				if err != nil {
 					return nil, err
