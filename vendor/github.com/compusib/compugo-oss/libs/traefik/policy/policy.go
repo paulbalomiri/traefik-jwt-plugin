@@ -270,15 +270,26 @@ func (n *normalizer) rule(e *settings.Entry) (*Rule, error) {
 	if r.Any, err = n.scopes(e.Entries(keyAny)); err != nil {
 		return nil, err
 	}
-	if r.Public && len(r.Scopes)+len(r.Any) > 0 {
+	if r.Public && len(r.Any) > 0 {
 		return nil, settings.Errorf(e.Path, "a public rule has no scopes")
 	}
 
+	at := settings.Join(e.Path, keyMissing)
 	actions := e.Entries(keyMissing)
 	if len(actions) != 1 {
-		return nil, settings.Errorf(settings.Join(e.Path, keyMissing), "one action per rule")
+		return nil, settings.Errorf(at, "one action per rule")
 	}
-	if r.Missing, err = n.missing(actions[0]); err != nil {
+	// A public rule lets pass whoever is not signed in, and asks whoever is for its scopes: what is missing is
+	// fetched by a login. It refuses nobody, so a deny is written on no public rule.
+	switch {
+	case r.Public && e.Written(keyMissing) && actionOf(actions[0]) == actionDeny:
+		return nil, settings.Errorf(at, "a public rule refuses nobody (%s, or not written)", actionLogin)
+	case r.Public && !e.Written(keyMissing) && len(r.Scopes) > 0:
+		r.Missing, err = n.login(nil, at)
+	default:
+		r.Missing, err = n.missing(actions[0])
+	}
+	if err != nil {
 		return nil, err
 	}
 	return r, nil
@@ -318,7 +329,11 @@ func (n *normalizer) missing(e *settings.Entry) (Missing, error) {
 		}
 		return Missing{}, settings.Errorf(at, "%q is no action (%s, %s)", e.Text(keyAction), actionLogin, actionDeny)
 	}
+	return n.login(scope, e.Path)
+}
 
+// login is the login with its scope as written, or with its defaults where scope is nil. at is the login's key.
+func (n *normalizer) login(scope *settings.Entry, at string) (Missing, error) {
 	login := &LoginScope{}
 	groupWritten := scope != nil && scope.Written(keyGroup)
 	if groupWritten {
@@ -334,7 +349,7 @@ func (n *normalizer) missing(e *settings.Entry) (Missing, error) {
 	} else {
 		group, ok := n.theGroup()
 		if !ok {
-			return Missing{}, settings.Errorf(e.Path, "a %s names its %s.%s where there are several groups (%s)",
+			return Missing{}, settings.Errorf(at, "a %s names its %s.%s where there are several groups (%s)",
 				actionLogin, keyScope, keyGroup, strings.Join(n.names, ", "))
 		}
 		login.Group = group
@@ -345,7 +360,7 @@ func (n *normalizer) missing(e *settings.Entry) (Missing, error) {
 	} else {
 		login.RequireOtherGroupMembers = n.groups[login.Group].RequireAllScopesForAnyMember
 	}
-	return Missing{Action: action, Scope: login}, nil
+	return Missing{Action: actionLogin, Scope: login}, nil
 }
 
 func contains(list []string, value string) bool {
