@@ -19,6 +19,8 @@
 //   - G7: a dot nests, everywhere, so a key has no dot: "scope.group: x" and "scope: {group: x}" are the same. A
 //     name with a dot is written as a value, or as an entry's field.
 //   - G8: keys are read without regard to case; values are text, read as what the setting expects ("true", "10").
+//     A boolean is read as Traefik reads a label's, which is strconv.ParseBool: 1, t, T, true, True, TRUE and
+//     0, f, F, false, False, FALSE.
 //   - G9: anything else is refused, with an error that names the key: an unknown key, two forms mixed in one
 //     setting, a value that is no such thing.
 //
@@ -306,18 +308,18 @@ func readText(path string, v any) (string, error) {
 	return "", Errorf(path, "a %T cannot be read", v)
 }
 
+// readBool reads a boolean as Traefik reads a label's, which is strconv.ParseBool: 1, t, T, true, True, TRUE and
+// 0, f, F, false, False, FALSE. A cluster's number 1 or 0 is that text, so a label and an object give the same.
 func readBool(path string, v any) (bool, error) {
 	s, err := readText(path, v)
 	if err != nil {
 		return false, err
 	}
-	switch strings.ToLower(s) {
-	case "true":
-		return true, nil
-	case "false":
-		return false, nil
+	b, err := strconv.ParseBool(s)
+	if err != nil {
+		return false, Errorf(path, "%q is neither true nor false", s)
 	}
-	return false, Errorf(path, "%q is neither true nor false", s)
+	return b, nil
 }
 
 func readNumber(path string, v any) (int, error) {
@@ -334,13 +336,8 @@ func readNumber(path string, v any) (int, error) {
 
 // isTrue says whether v is a bare true: the entry with its defaults (G5).
 func isTrue(v any) bool {
-	switch x := v.(type) {
-	case bool:
-		return x
-	case string:
-		return strings.EqualFold(x, "true")
-	}
-	return false
+	b, err := readBool("", v)
+	return err == nil && b
 }
 
 // split is the values of a text: one, or as many as the delimiter makes of it (G1).
