@@ -316,53 +316,133 @@ func TestOpaDecidesTokenNeedsAnOpa(t *testing.T) {
 	}
 }
 
-// The rules of the service a middleware is on are its own configuration: the plugin passes them to OPA unread.
-func TestRulesOfTheServiceReachOpa(t *testing.T) {
-	var input map[string]interface{}
-	opa := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+// opaReceiving starts an OPA that lets every request pass and keeps the input of the last one in *input.
+func opaReceiving(t *testing.T, input *map[string]interface{}) *httptest.Server {
+	t.Helper()
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var payload map[string]map[string]interface{}
 		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 			t.Error(err)
 		}
-		input = payload["input"]
+		*input = payload["input"]
 		_, _ = fmt.Fprint(w, `{ "result": { "allow": true } }`)
 	}))
-	defer opa.Close()
-	cfg := &Config{OpaUrl: opa.URL, OpaAllowField: "allow", Rules: []Rule{
-		{Paths: []string{"/open/**"}, Public: true},
-		{Paths: []string{"/reports/**"}, Methods: []string{"GET"}, Scopes: []string{"reports.read"}, Missing: "login"},
-		{Paths: []string{"/either/**"}, Any: []string{"a", "b"}},
-	}}
+	t.Cleanup(ts.Close)
+	return ts
+}
+
+// The settings of the service a middleware is on are its own configuration, written in compusib's grammar for a
+// plugin's settings. The plugin normalizes them when the middleware is created and passes the one form to OPA with
+// every request, as input.rules and input.groups. Here the shortest form: two settings at the top.
+func TestSettingsOfTheServiceReachOpaNormalized(t *testing.T) {
+	var input map[string]interface{}
+	opa := opaReceiving(t, &input)
+	cfg := &Config{OpaUrl: opa.URL, OpaAllowField: "allow", Scopes: "admin.cluster", Missing: "login"}
 
 	serve(t, cfg, httptest.NewRequest(http.MethodGet, "http://localhost/", nil))
 
-	expected := []interface{}{
-		map[string]interface{}{"paths": []interface{}{"/open/**"}, "public": true},
-		map[string]interface{}{"paths": []interface{}{"/reports/**"}, "methods": []interface{}{"GET"}, "scopes": []interface{}{"reports.read"}, "missing": "login"},
-		map[string]interface{}{"paths": []interface{}{"/either/**"}, "any": []interface{}{"a", "b"}},
+	rules := []interface{}{map[string]interface{}{
+		"name": "default", "priority": float64(3),
+		"paths": []interface{}{"/**"}, "methods": []interface{}{}, "public": false,
+		"scopes": []interface{}{map[string]interface{}{"name": "admin.cluster", "group": "default"}},
+		"any":    []interface{}{},
+		"missing": map[string]interface{}{
+			"action": "login",
+			"scope":  map[string]interface{}{"group": "default", "requireOtherGroupMembers": true},
+		},
+	}}
+	if !reflect.DeepEqual(input["rules"], rules) {
+		t.Fatalf("OPA received the rules %v, expected %v", input["rules"], rules)
 	}
-	if !reflect.DeepEqual(input["rules"], expected) {
-		t.Fatalf("OPA received the rules %v, expected %v", input["rules"], expected)
+	groups := map[string]interface{}{"default": map[string]interface{}{
+		"scopes": []interface{}{"admin.cluster"}, "requireAllScopesForAnyMember": true,
+	}}
+	if !reflect.DeepEqual(input["groups"], groups) {
+		t.Fatalf("OPA received the groups %v, expected %v", input["groups"], groups)
 	}
 }
 
-func TestRequestOfAServiceWithoutRulesCarriesNone(t *testing.T) {
+// Settings as docker labels hand them over, a map whose values are texts, give the same form as a cluster's object.
+func TestSettingsWrittenAsLabelsAndAsAnObjectAreOneForm(t *testing.T) {
+	asLabels := map[string]interface{}{"page": map[string]interface{}{
+		"Paths": "/a/**,/b/**", "Methods": "GET", "Missing": "login",
+		"Scopes": map[string]interface{}{"0": map[string]interface{}{"name": "reports.read"}},
+	}}
+	asObject := []interface{}{map[string]interface{}{
+		"Paths": []interface{}{"/a/**", "/b/**"}, "Methods": []interface{}{"GET"}, "Missing": "login",
+		"Scopes": []interface{}{"reports.read"},
+	}}
+	received := func(rules interface{}) map[string]interface{} {
+		var input map[string]interface{}
+		opa := opaReceiving(t, &input)
+		serve(t, &Config{OpaUrl: opa.URL, OpaAllowField: "allow", Rules: rules}, httptest.NewRequest(http.MethodGet, "http://localhost/", nil))
+		rule := input["rules"].([]interface{})[0].(map[string]interface{})
+		delete(rule, "name") // the key in the one, the place in the list in the other
+		return rule
+	}
+
+	fromLabels, fromObject := received(asLabels), received(asObject)
+
+	if !reflect.DeepEqual(fromLabels, fromObject) {
+		t.Fatalf("the labels gave %v, the object %v", fromLabels, fromObject)
+	}
+	if paths := fromLabels["paths"]; !reflect.DeepEqual(paths, []interface{}{"/a/**", "/b/**"}) {
+		t.Fatalf("the paths are %v", paths)
+	}
+}
+
+// Settings the grammar cannot read refuse the middleware: Traefik does not create it, and its routes answer 404.
+func TestMiddlewareWithUnreadableSettingsIsNotCreated(t *testing.T) {
+	cfg := &Config{OpaUrl: "http://localhost:8181", OpaAllowField: "allow", Rules: map[string]interface{}{
+		"page": map[string]interface{}{"Scopse": "admin"},
+	}}
+	next := http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {})
+
+	_, err := New(context.Background(), next, cfg, "test-traefik-jwt-plugin")
+
+	if err == nil || !strings.Contains(err.Error(), `Rules.page: unknown key "Scopse"`) {
+		t.Fatalf("the middleware was created, or the error does not name the key: %v", err)
+	}
+}
+
+func TestRequestOfAServiceWithoutSettingsCarriesNone(t *testing.T) {
 	var input map[string]interface{}
-	opa := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var payload map[string]map[string]interface{}
-		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-			t.Error(err)
-		}
-		input = payload["input"]
-		_, _ = fmt.Fprint(w, `{ "result": { "allow": true } }`)
-	}))
-	defer opa.Close()
+	opa := opaReceiving(t, &input)
 	cfg := &Config{OpaUrl: opa.URL, OpaAllowField: "allow"}
 
 	serve(t, cfg, httptest.NewRequest(http.MethodGet, "http://localhost/", nil))
 
-	if rules, sent := input["rules"]; sent {
-		t.Fatalf("OPA received rules %v from a middleware that has none", rules)
+	for _, key := range []string{"rules", "groups"} {
+		if value, sent := input[key]; sent {
+			t.Fatalf("OPA received %s %v from a middleware that has none", key, value)
+		}
+	}
+}
+
+// A decision may set several cookies: a header OPA gives as a list has one line per entry.
+func TestOpaHeaderGivenAsAListHasOneLinePerEntry(t *testing.T) {
+	opa := opaAnswering(t, `{ "allow": false, "status": 302, "location": "/login", "set_cookie": ["asked.a=1; Path=/", "asked.b=1; Path=/"] }`)
+	cfg := &Config{
+		OpaUrl: opa.URL, OpaAllowField: "allow", OpaHttpStatusField: "status",
+		OpaResponseHeaders: map[string]string{"Location": "location", "Set-Cookie": "set_cookie"},
+	}
+	next := http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {})
+	plugin, err := New(context.Background(), next, cfg, "test-traefik-jwt-plugin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := httptest.NewRecorder()
+	recorder.Header().Add("Set-Cookie", "session=refreshed; Path=/")
+
+	plugin.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "http://localhost/", nil))
+
+	got := recorder.Result().Header.Values("Set-Cookie")
+	want := []string{"session=refreshed; Path=/", "asked.a=1; Path=/", "asked.b=1; Path=/"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("the cookies are %q, expected %q", got, want)
+	}
+	if got := recorder.Result().Header.Values("Location"); !reflect.DeepEqual(got, []string{"/login"}) {
+		t.Fatalf("the Location is %q", got)
 	}
 }
 

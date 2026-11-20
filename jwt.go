@@ -25,6 +25,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/compusib/compugo-oss/libs/traefik/policy"
 )
 
 // keyRegistry holds the key material shared by every plugin instance built
@@ -127,24 +129,26 @@ type Config struct {
 	// the body is the plugin's own text.
 	OpaBodyField string
 
-	// Rules are the rules of the service this middleware is on. The plugin
-	// does not read them: it passes them to OPA with every request, as
-	// input.rules, and OPA's policy decides by them. A service so declares
-	// what it requires in its own Traefik configuration: an object on a
-	// cluster, labels on the service in docker.
-	Rules []Rule
-}
-
-// Rule is one rule of a service, as OPA's policy reads it: the paths and
-// methods it is for, who it lets pass, and what a request that does not pass
-// gets. Its meaning is the policy's; the names here are what OPA receives.
-type Rule struct {
-	Paths   []string `json:"paths,omitempty"`
-	Methods []string `json:"methods,omitempty"`
-	Public  bool     `json:"public,omitempty"`
-	Scopes  []string `json:"scopes,omitempty"`
-	Any     []string `json:"any,omitempty"`
-	Missing string   `json:"missing,omitempty"`
+	// The settings of the service this middleware is on: its rules, its
+	// scope groups, or for a service with one rule that rule's fields here
+	// at the top. A service so declares what it requires in its own Traefik
+	// configuration: an object on a cluster, labels on the service in
+	// docker. They are written in compusib's grammar for a plugin's settings
+	// (github.com/compusib/compugo-oss/libs/traefik), which is why they are
+	// free-form here: Traefik hands them over as written. The plugin
+	// normalizes them when the middleware is created, refuses to be created
+	// on what the grammar cannot read, and passes the one normalized form to
+	// OPA with every request, as input.rules and input.groups. What they
+	// mean is the policy's.
+	Rules    interface{}
+	Groups   interface{}
+	Paths    interface{}
+	Methods  interface{}
+	Public   interface{}
+	Scopes   interface{}
+	Any      interface{}
+	Missing  interface{}
+	Priority interface{}
 }
 
 // CreateConfig creates a new OPA Config
@@ -175,7 +179,8 @@ type JwtPlugin struct {
 	opaDecidesToken    bool
 	opaBodyField       string
 	opaClient          *http.Client
-	rules              []Rule
+	rules              []*policy.Rule
+	groups             map[string]*policy.Group
 
 	name         string
 	forceRefresh bool
@@ -248,17 +253,18 @@ type Keys struct {
 
 // PayloadInput is the input payload
 type PayloadInput struct {
-	Host       string                 `json:"host"`
-	Method     string                 `json:"method"`
-	Path       []string               `json:"path"`
-	Parameters url.Values             `json:"parameters"`
-	Headers    map[string][]string    `json:"headers"`
-	JWTHeader  JwtHeader              `json:"tokenHeader"`
-	JWTPayload map[string]interface{} `json:"tokenPayload"`
-	TokenError string                 `json:"tokenError,omitempty"`
-	Rules      []Rule                 `json:"rules,omitempty"`
-	Body       interface{}            `json:"body,omitempty"`
-	Form       url.Values             `json:"form,omitempty"`
+	Host       string                   `json:"host"`
+	Method     string                   `json:"method"`
+	Path       []string                 `json:"path"`
+	Parameters url.Values               `json:"parameters"`
+	Headers    map[string][]string      `json:"headers"`
+	JWTHeader  JwtHeader                `json:"tokenHeader"`
+	JWTPayload map[string]interface{}   `json:"tokenPayload"`
+	TokenError string                   `json:"tokenError,omitempty"`
+	Rules      []*policy.Rule           `json:"rules,omitempty"`
+	Groups     map[string]*policy.Group `json:"groups,omitempty"`
+	Body       interface{}              `json:"body,omitempty"`
+	Form       url.Values               `json:"form,omitempty"`
 }
 
 // Payload for OPA requests
@@ -273,6 +279,18 @@ type Response struct {
 
 // New creates a new plugin
 func New(ctx context.Context, next http.Handler, config *Config, pluginName string) (http.Handler, error) {
+	// A setting that is not written is nil, which the grammar reads as not written.
+	settings, err := policy.Normalize(map[string]interface{}{
+		"Rules": config.Rules, "Groups": config.Groups,
+		"Paths": config.Paths, "Methods": config.Methods, "Public": config.Public, "Scopes": config.Scopes,
+		"Any": config.Any, "Missing": config.Missing, "Priority": config.Priority,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if normalized, encodeErr := json.Marshal(settings); encodeErr == nil {
+		logInfo(fmt.Sprintf("settings of %s: %s", pluginName, normalized)).print()
+	}
 	jwtPlugin := &JwtPlugin{
 		next:               next,
 		opaUrl:             config.OpaUrl,
@@ -290,7 +308,8 @@ func New(ctx context.Context, next http.Handler, config *Config, pluginName stri
 		aud:                config.Aud,
 		opaDecidesToken:    config.OpaDecidesToken,
 		opaBodyField:       config.OpaBodyField,
-		rules:              config.Rules,
+		rules:              settings.Rules,
+		groups:             settings.Groups,
 		opaClient:          &http.Client{Timeout: time.Duration(config.OpaTimeoutMs) * time.Millisecond},
 		name:               pluginName,
 		forceRefresh:       config.ForceRefreshKeys,
@@ -860,6 +879,7 @@ func (jwtPlugin *JwtPlugin) CheckOpa(request *http.Request, token *JWT, tokenErr
 	}
 	opaPayload.Input.TokenError = tokenError
 	opaPayload.Input.Rules = jwtPlugin.rules
+	opaPayload.Input.Groups = jwtPlugin.groups
 	authPayloadAsJSON, err := json.Marshal(opaPayload)
 	if err != nil {
 		return 0, err
@@ -891,17 +911,25 @@ func (jwtPlugin *JwtPlugin) CheckOpa(request *http.Request, token *JWT, tokenErr
 		return http.StatusServiceUnavailable, err
 	}
 	for k, v := range jwtPlugin.opaResponseHeaders {
-		var value string
-		if rawVal, rawValOk := result.Result[v]; rawValOk {
-			if err = json.Unmarshal(rawVal, &value); err != nil {
+		rawVal, rawValOk := result.Result[v]
+		if !rawValOk {
+			continue
+		}
+		// A header OPA gives as a list has one line per entry.
+		var values []string
+		if listErr := json.Unmarshal(rawVal, &values); listErr != nil {
+			var value string
+			if textErr := json.Unmarshal(rawVal, &value); textErr != nil {
 				value = string(rawVal)
 			}
-			if http.CanonicalHeaderKey(k) == "Set-Cookie" {
-				// A cookie is added: one an earlier middleware put on the response stays.
-				rw.Header().Add(k, value)
-			} else {
-				rw.Header().Set(k, value)
-			}
+			values = []string{value}
+		}
+		// A cookie is added: one an earlier middleware put on the response stays. Any other header replaces.
+		if http.CanonicalHeaderKey(k) != "Set-Cookie" {
+			rw.Header().Del(k)
+		}
+		for _, value := range values {
+			rw.Header().Add(k, value)
 		}
 	}
 

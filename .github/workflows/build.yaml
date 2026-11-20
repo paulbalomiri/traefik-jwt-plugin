@@ -34,5 +34,5 @@ jobs:
           gopath=$(mktemp -d)
           mkdir -p "$gopath/src/$(dirname "$module")"
           ln -s "$PWD" "$gopath/src/$module"
-          cd "$gopath/src/$module"
-          GOPATH="$gopath" "$(go env GOPATH)/bin/yaegi" test -v .
+          # by its import path, as Traefik loads a plugin: its vendor directory is found that way
+          GOPATH="$gopath" "$(go env GOPATH)/bin/yaegi" test -v "$module"
