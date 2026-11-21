@@ -7,27 +7,38 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
 )
 
+// setenv sets a variable of the environment for one test. It is not t.Setenv: under Yaegi that sets the variable of
+// the process, and a plugin reads the interpreter's environment, which Traefik fills from its own when it starts.
+func setenv(t *testing.T, name, value string) {
+	t.Helper()
+	if err := os.Setenv(name, value); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Unsetenv(name) })
+}
+
 func TestSettingTakesItsDefaultFromTheEnvironment(t *testing.T) {
-	t.Setenv("JWT_PLUGIN_OPAURL", "http://opa:8181/v1/data/policy/decision")
-	t.Setenv("JWT_PLUGIN_OPAALLOWFIELD", "let")
-	t.Setenv("JWT_PLUGIN_OPAHTTPSTATUSFIELD", "status")
-	t.Setenv("JWT_PLUGIN_OPABODYFIELD", "body")
-	t.Setenv("JWT_PLUGIN_ALG", "RS256")
-	t.Setenv("JWT_PLUGIN_AUD", "host.example")
-	t.Setenv("JWT_PLUGIN_OPABODY", "false")
-	t.Setenv("JWT_PLUGIN_OPADEBUGMODE", "true")
-	t.Setenv("JWT_PLUGIN_REQUIRED", "false")
-	t.Setenv("JWT_PLUGIN_FORCEREFRESHKEYS", "true")
-	t.Setenv("JWT_PLUGIN_OPADECIDESTOKEN", "true")
-	t.Setenv("JWT_PLUGIN_OPATIMEOUTMS", "2000")
-	t.Setenv("JWT_PLUGIN_JWKSFETCHTIMEOUTSECS", "5")
-	t.Setenv("JWT_PLUGIN_KEYS", "https://auth.example/.well-known/jwks.json, https://other.example/jwks")
-	t.Setenv("JWT_PLUGIN_PAYLOADFIELDS", "exp")
+	setenv(t, "JWT_PLUGIN_OPAURL", "http://opa:8181/v1/data/policy/decision")
+	setenv(t, "JWT_PLUGIN_OPAALLOWFIELD", "let")
+	setenv(t, "JWT_PLUGIN_OPAHTTPSTATUSFIELD", "status")
+	setenv(t, "JWT_PLUGIN_OPABODYFIELD", "body")
+	setenv(t, "JWT_PLUGIN_ALG", "RS256")
+	setenv(t, "JWT_PLUGIN_AUD", "host.example")
+	setenv(t, "JWT_PLUGIN_OPABODY", "false")
+	setenv(t, "JWT_PLUGIN_OPADEBUGMODE", "true")
+	setenv(t, "JWT_PLUGIN_REQUIRED", "false")
+	setenv(t, "JWT_PLUGIN_FORCEREFRESHKEYS", "true")
+	setenv(t, "JWT_PLUGIN_OPADECIDESTOKEN", "true")
+	setenv(t, "JWT_PLUGIN_OPATIMEOUTMS", "2000")
+	setenv(t, "JWT_PLUGIN_JWKSFETCHTIMEOUTSECS", "5")
+	setenv(t, "JWT_PLUGIN_KEYS", "https://auth.example/.well-known/jwks.json, https://other.example/jwks")
+	setenv(t, "JWT_PLUGIN_PAYLOADFIELDS", "exp")
 
 	got := CreateConfig()
 
@@ -55,9 +66,9 @@ func TestWithoutTheEnvironmentTheDefaultsAreThePlugins(t *testing.T) {
 }
 
 func TestEmptyVariableIsAsOneNotSet(t *testing.T) {
-	t.Setenv("JWT_PLUGIN_OPAALLOWFIELD", "")
-	t.Setenv("JWT_PLUGIN_REQUIRED", "")
-	t.Setenv("JWT_PLUGIN_KEYS", "")
+	setenv(t, "JWT_PLUGIN_OPAALLOWFIELD", "")
+	setenv(t, "JWT_PLUGIN_REQUIRED", "")
+	setenv(t, "JWT_PLUGIN_KEYS", "")
 
 	got := CreateConfig()
 
@@ -79,17 +90,16 @@ func noKeys(t *testing.T) string {
 
 func TestListIsTheEnvironmentsWhereTheMiddlewareWritesNone(t *testing.T) {
 	jwks := noKeys(t)
-	t.Setenv("JWT_PLUGIN_PAYLOADFIELDS", "exp, sub")
-	t.Setenv("JWT_PLUGIN_KEYS", jwks+"/one,"+jwks+"/two")
+	setenv(t, "JWT_PLUGIN_PAYLOADFIELDS", "exp, sub")
+	setenv(t, "JWT_PLUGIN_KEYS", jwks+"/one,"+jwks+"/two")
 
 	cfg := CreateConfig()
-	plugin, err := New(context.Background(), http.NotFoundHandler(), cfg, "test-lists-of-the-environment")
-	if err != nil {
+	if _, err := New(context.Background(), http.NotFoundHandler(), cfg, "test-lists-of-the-environment"); err != nil {
 		t.Fatal(err)
 	}
 
-	if got, want := plugin.(*JwtPlugin).payloadFields, []string{"exp", "sub"}; !reflect.DeepEqual(got, want) {
-		t.Errorf("the required fields: got %v, want %v", got, want)
+	if want := []string{"exp", "sub"}; !reflect.DeepEqual(cfg.PayloadFields, want) {
+		t.Errorf("the required fields: got %v, want %v", cfg.PayloadFields, want)
 	}
 	if want := []string{jwks + "/one", jwks + "/two"}; !reflect.DeepEqual(cfg.Keys, want) {
 		t.Errorf("the keys: got %v, want %v", cfg.Keys, want)
@@ -98,32 +108,49 @@ func TestListIsTheEnvironmentsWhereTheMiddlewareWritesNone(t *testing.T) {
 
 func TestListTheMiddlewareWritesIsItsWholeList(t *testing.T) {
 	jwks := noKeys(t)
-	t.Setenv("JWT_PLUGIN_PAYLOADFIELDS", "exp, sub")
-	t.Setenv("JWT_PLUGIN_KEYS", jwks+"/one,"+jwks+"/two")
+	setenv(t, "JWT_PLUGIN_PAYLOADFIELDS", "exp, sub")
+	setenv(t, "JWT_PLUGIN_KEYS", jwks+"/one,"+jwks+"/two")
 
 	cfg := CreateConfig()
 	cfg.PayloadFields = []string{"iat"} // what the middleware writes: one entry where the environment has two
 	cfg.Keys = []string{jwks + "/own"}
-	plugin, err := New(context.Background(), http.NotFoundHandler(), cfg, "test-lists-of-the-middleware")
-	if err != nil {
+	if _, err := New(context.Background(), http.NotFoundHandler(), cfg, "test-lists-of-the-middleware"); err != nil {
 		t.Fatal(err)
 	}
 
-	if got, want := plugin.(*JwtPlugin).payloadFields, []string{"iat"}; !reflect.DeepEqual(got, want) {
-		t.Errorf("the required fields: got %v, want %v", got, want)
+	if want := []string{"iat"}; !reflect.DeepEqual(cfg.PayloadFields, want) {
+		t.Errorf("the required fields: got %v, want %v", cfg.PayloadFields, want)
 	}
 	if want := []string{jwks + "/own"}; !reflect.DeepEqual(cfg.Keys, want) {
 		t.Errorf("the keys: got %v, want %v", cfg.Keys, want)
 	}
 }
 
+// The environment's list is in force: a token that lacks a field it names is refused, one that has them all passes.
+func TestFieldTheEnvironmentRequiresIsRequired(t *testing.T) {
+	setenv(t, "JWT_PLUGIN_PAYLOADFIELDS", "exp, tenant")
+	ask := func(claims string) bool {
+		req := httptest.NewRequest(http.MethodGet, "http://docs.example/", nil)
+		req.Header.Set("Authorization", bearer(claims))
+		_, reached := serve(t, CreateConfig(), req)
+		return reached
+	}
+
+	if ask(`{"exp": 4102444800}`) {
+		t.Error("a token without the field tenant reached the service")
+	}
+	if !ask(`{"exp": 4102444800, "tenant": "a"}`) {
+		t.Error("a token with both fields did not reach the service")
+	}
+}
+
 func TestEntryOfAMapIsAVariableOfItsOwn(t *testing.T) {
-	t.Setenv("JWT_PLUGIN_OPARESPONSEHEADERS_LOCATION", "location")
-	t.Setenv("JWT_PLUGIN_OPARESPONSEHEADERS_SET_COOKIE", "set_cookie")
-	t.Setenv("JWT_PLUGIN_OPARESPONSEHEADERS_CONTENT_TYPE", "content_type")
-	t.Setenv("JWT_PLUGIN_OPAHEADERS_X_USER", "user")
-	t.Setenv("JWT_PLUGIN_JWTHEADERS_X_SUBJECT", "sub")
-	t.Setenv("JWT_PLUGIN_JWKSHEADERS_AUTHORIZATION", "Basic a2V5OnZhbHVl")
+	setenv(t, "JWT_PLUGIN_OPARESPONSEHEADERS_LOCATION", "location")
+	setenv(t, "JWT_PLUGIN_OPARESPONSEHEADERS_SET_COOKIE", "set_cookie")
+	setenv(t, "JWT_PLUGIN_OPARESPONSEHEADERS_CONTENT_TYPE", "content_type")
+	setenv(t, "JWT_PLUGIN_OPAHEADERS_X_USER", "user")
+	setenv(t, "JWT_PLUGIN_JWTHEADERS_X_SUBJECT", "sub")
+	setenv(t, "JWT_PLUGIN_JWKSHEADERS_AUTHORIZATION", "Basic a2V5OnZhbHVl")
 
 	got := CreateConfig()
 
@@ -150,7 +177,7 @@ func TestVariableThatNamesNoSettingStopsTheMiddleware(t *testing.T) {
 		"JWT_PLUGIN_OPARESPONSEHEADERS", // a map is given entry by entry
 	} {
 		t.Run(name, func(t *testing.T) {
-			t.Setenv(name, "x")
+			setenv(t, name, "x")
 
 			_, err := New(context.Background(), http.NotFoundHandler(), CreateConfig(), "test")
 
@@ -167,7 +194,7 @@ func TestValueOfTheWrongKindStopsTheMiddleware(t *testing.T) {
 		"JWT_PLUGIN_OPATIMEOUTMS": "soon",
 	} {
 		t.Run(name, func(t *testing.T) {
-			t.Setenv(name, value)
+			setenv(t, name, value)
 
 			_, err := New(context.Background(), http.NotFoundHandler(), CreateConfig(), "test")
 
@@ -181,11 +208,11 @@ func TestValueOfTheWrongKindStopsTheMiddleware(t *testing.T) {
 // A middleware that writes a service's own lines alone asks the OPA of the environment and carries its answer out.
 func TestMiddlewareWithTheServicesLinesAloneAsksTheOpaOfTheEnvironment(t *testing.T) {
 	opa := opaAnswering(t, `{"allow": false, "status": 302, "location": "/login?scope=docs"}`)
-	t.Setenv("JWT_PLUGIN_OPAURL", opa.URL)
-	t.Setenv("JWT_PLUGIN_REQUIRED", "false")
-	t.Setenv("JWT_PLUGIN_OPADECIDESTOKEN", "true")
-	t.Setenv("JWT_PLUGIN_OPAHTTPSTATUSFIELD", "status")
-	t.Setenv("JWT_PLUGIN_OPARESPONSEHEADERS_LOCATION", "location")
+	setenv(t, "JWT_PLUGIN_OPAURL", opa.URL)
+	setenv(t, "JWT_PLUGIN_REQUIRED", "false")
+	setenv(t, "JWT_PLUGIN_OPADECIDESTOKEN", "true")
+	setenv(t, "JWT_PLUGIN_OPAHTTPSTATUSFIELD", "status")
+	setenv(t, "JWT_PLUGIN_OPARESPONSEHEADERS_LOCATION", "location")
 	cfg := CreateConfig()
 	cfg.Scopes = "stack.docs.view" // the service's two lines
 	cfg.Missing = "login"
