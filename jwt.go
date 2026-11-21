@@ -21,6 +21,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -149,15 +150,24 @@ type Config struct {
 	Any      interface{}
 	Missing  interface{}
 	Priority interface{}
+
+	// What Traefik's environment gave no usable default with (defaultsFromEnvironment): the middleware is not
+	// created on it. And the lists the environment gives, for a middleware that writes none (listDefaults).
+	environmentError     error
+	defaultKeys          []string
+	defaultPayloadFields []string
 }
 
-// CreateConfig creates a new OPA Config
+// CreateConfig creates a new OPA Config: the plugin's defaults, and over them the defaults the deployment gives in
+// Traefik's environment (JWT_PLUGIN_<SETTING>, see defaultsFromEnvironment). What a middleware writes replaces both.
 func CreateConfig() *Config {
-	return &Config{
+	config := &Config{
 		Required:      true, // default to Authorization JWT header is required
 		OpaAllowField: "allow",
 		OpaBody:       true,
 	}
+	config.environmentError = config.defaultsFromEnvironment(os.Environ())
+	return config
 }
 
 // JwtPlugin contains the runtime config
@@ -279,6 +289,10 @@ type Response struct {
 
 // New creates a new plugin
 func New(ctx context.Context, next http.Handler, config *Config, pluginName string) (http.Handler, error) {
+	if config.environmentError != nil {
+		return nil, config.environmentError
+	}
+	config.listDefaults()
 	// A setting that is not written is nil, which the grammar reads as not written.
 	settings, err := policy.Normalize(map[string]interface{}{
 		"Rules": config.Rules, "Groups": config.Groups,

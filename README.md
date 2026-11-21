@@ -74,6 +74,47 @@ JwtQueryKey | (Deprecated, use JwtSources) Name of the query parameter to extrac
 JwtSources | Ordered List of sources [bearer, header, query, cookie] of the JWT. config format is a list of maps e.g. [{type: bearer, key: Authorization}, {type: query, key, jwt}]
 
 
+### Defaults from Traefik's environment
+
+A setting that a middleware does not write takes the value of the environment variable `JWT_PLUGIN_<SETTING>` of
+Traefik's process, where one is set: the setting's name in upper case. A deployment so says once what all its
+middlewares of this plugin share (where OPA is, the keys, the fields of the decision), and a service's middleware
+holds the service's own settings alone.
+
+Kind of setting | Example | The variable's value
+---- | ---- | ----
+a text | `JWT_PLUGIN_OPAURL` | the text
+a switch | `JWT_PLUGIN_REQUIRED` | `true` or `false`
+a number | `JWT_PLUGIN_OPATIMEOUTMS` | digits
+a list: `Keys`, `PayloadFields` | `JWT_PLUGIN_KEYS` | the entries, separated by commas
+a map: `OpaHeaders`, `JwtHeaders`, `JwksHeaders`, `OpaResponseHeaders` | `JWT_PLUGIN_OPARESPONSEHEADERS_SET_COOKIE` | one variable per entry: the header's name follows the setting's, in upper case with `_` for its `-`
+
+- What a middleware writes replaces the default. A list it writes is its whole list. An entry of a map is a setting
+  of its own: a middleware that writes one keeps the other entries of the default.
+- An empty variable is as one not set.
+- A variable that names no such setting, or whose value is not of its setting's kind, is an error: no middleware of
+  the plugin is created.
+- The settings of a service (`Rules`, `Groups` and a rule's fields), `JwtSources`, `JwtCookieKey` and `JwtQueryKey`
+  have no default in the environment.
+
+With these in Traefik's environment a service's middleware is the service's two lines:
+
+```yaml
+# Traefik's environment
+JWT_PLUGIN_OPAURL: http://opa:8181/v1/data/policy/decision
+JWT_PLUGIN_KEYS: https://auth.example/.well-known/jwks.json
+JWT_PLUGIN_REQUIRED: 'false'
+JWT_PLUGIN_OPADECIDESTOKEN: 'true'
+JWT_PLUGIN_OPAHTTPSTATUSFIELD: status
+JWT_PLUGIN_OPARESPONSEHEADERS_LOCATION: location
+```
+
+```yaml
+# the service's labels
+traefik.http.middlewares.docs-policy.plugin.jwt.Scopes: stack.docs.view
+traefik.http.middlewares.docs-policy.plugin.jwt.Missing: login
+```
+
 ### Example configuration
 
 This example uses Kubernetes Custom Resource Descriptors (CRD) :
