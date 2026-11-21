@@ -1,2 +1,4 @@
 github.com/compusib/compugo-oss/libs/traefik v0.2.0 h1:vUKxLFOdM2tFxbK1HQks+rHweBObySdu5bBuNlc9tGg=
 github.com/compusib/compugo-oss/libs/traefik v0.2.0/go.mod h1:16QPpff537i+i3hnutv7L/6Q3VnEOzFv/PqxW1+kpZ0=
+github.com/compusib/compugo-oss/libs/traefik v0.3.0 h1:raVeXj7Gf0HGI17I3XWubUMlgua2UgLjaf1eVYIXz1U=
+github.com/compusib/compugo-oss/libs/traefik v0.3.0/go.mod h1:16QPpff537i+i3hnutv7L/6Q3VnEOzFv/PqxW1+kpZ0=

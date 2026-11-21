@@ -9,8 +9,24 @@ import (
 	parser "github.com/paulbalomiri/traefik-jwt-plugin/paerser"
 )
 
-// The settings a service may write: its rules, its scope groups, or one rule's fields at the top.
-var serviceSettings = []string{"Rules", "Groups", "Paths", "Methods", "Public", "Scopes", "Any", "Missing", "Priority"}
+// The settings a service may write: its rules, its scope groups, or one rule's fields at the top; and the scopes of
+// a group that writes none, where the service has its own.
+var serviceSettings = []string{
+	"Rules", "Groups", groupDefaultScopes,
+	"Paths", "Methods", "Public", "Group", "Scopes", "RequestOtherGroupScopes", "Missing", "Priority",
+	"ClaimChecks", "AdditionalChecks",
+}
+
+const groupDefaultScopes = "GroupDefaultScopes"
+
+func sortedKeys(m map[string]interface{}) []string {
+	keys := make([]string, 0, len(m))
+	for key := range m {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
 
 // settingsOfLabels reads the settings of a service from the service's docker labels, as a compose file writes them:
 //

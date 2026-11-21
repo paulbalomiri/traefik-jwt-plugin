@@ -68,7 +68,8 @@ OpaHttpStatusField | Field in OPA JSON result, which contains int or string HTTP
 OpaBodyField | Field in OPA JSON result which contains the body of the response in case of disallowed OPA response, as a string. Set its `Content-Type` with `OpaResponseHeaders`. Where the result lacks the field the body is `forbidden`.
 OpaDecidesToken | Boolean. A token that fails its checks (signature, expiry, required fields, audience) is not refused by the plugin: the request reaches OPA without `tokenPayload` and with the reason as `tokenError`, and OPA answers. Needs `OpaUrl`. Default `false`.
 OpaTimeoutMs | Timeout in milliseconds for the request to OPA. Default `0` (no timeout). A request that gets no decision from OPA — no answer in time, OPA unreachable, a result without `OpaAllowField` — is answered `503`.
-Rules, Groups | The settings of the service this middleware is on: its rules and its scope groups, written in compusib's grammar for a plugin's settings (`github.com/compusib/compugo-oss/libs/traefik`). A service with one rule writes that rule's fields at the top instead: `Paths`, `Methods`, `Public`, `Scopes`, `Any`, `Missing`, `Priority`. The plugin normalizes them when the middleware is created, logs the normalized form, and is not created on what the grammar cannot read. It passes the normalized form to OPA with every request as `input.rules` and `input.groups`; what they mean is the policy's.
+Rules, Groups | The settings of the service this middleware is on: its rules and its scope groups, written in compusib's grammar for a plugin's settings (`github.com/compusib/compugo-oss/libs/traefik`). A service with one rule writes that rule's fields at the top instead: `Paths`, `Methods`, `Public`, `Group`, `Scopes`, `RequestOtherGroupScopes`, `Missing`, `Priority`, `ClaimChecks`, `AdditionalChecks`. The plugin normalizes them when the middleware is created, logs the normalized form, and is not created on what the grammar cannot read. It passes the normalized form to OPA with every request as `input.rules`: each rule with its required and its optional scopes, the groups worked in. What they mean is the policy's.
+GroupDefaultScopes | The scopes of every group that writes none of its own, in the same grammar. A deployment gives them once, in Traefik's environment or on each middleware; a service that writes them itself has its own. One source replaces the other whole.
 Labels | The settings of the service as the service's docker labels, the lines a compose file writes for its middleware of this plugin: a map of label to value. See [The service's labels as one setting](#the-services-labels-as-one-setting). With `Labels` a middleware writes none of `Rules`, `Groups` and a rule's fields itself.
 JwtCookieKey | (Deprecated, use JwtSources)Name of the cookie to extract JWT if not found in `Authorization` header.
 JwtQueryKey | (Deprecated, use JwtSources) Name of the query parameter to extract JWT if not found in `Authorization` header or in the specified cookie.
@@ -97,6 +98,9 @@ a map: `OpaHeaders`, `JwtHeaders`, `JwksHeaders`, `OpaResponseHeaders` | `JWT_PL
   the plugin is created.
 - The settings of a service (`Rules`, `Groups` and a rule's fields), `JwtSources`, `JwtCookieKey` and `JwtQueryKey`
   have no default in the environment.
+- `GroupDefaultScopes` has: `JWT_PLUGIN_GROUPDEFAULTSCOPES` for scopes that are all required, or
+  `JWT_PLUGIN_GROUPDEFAULTSCOPES_REQUIRED` and `JWT_PLUGIN_GROUPDEFAULTSCOPES_OPTIONAL`, each a list of scopes
+  separated by spaces.
 
 With these in Traefik's environment a service's middleware is the service's two lines:
 

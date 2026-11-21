@@ -333,7 +333,8 @@ func opaReceiving(t *testing.T, input *map[string]interface{}) *httptest.Server 
 
 // The settings of the service a middleware is on are its own configuration, written in compusib's grammar for a
 // plugin's settings. The plugin normalizes them when the middleware is created and passes the one form to OPA with
-// every request, as input.rules and input.groups. Here the shortest form: two settings at the top.
+// every request, as input.rules. Here the shortest form: two settings at the top. The scopes beside the rule's own
+// are those of its group, which writes none: the built-in default scopes of a group.
 func TestSettingsOfTheServiceReachOpaNormalized(t *testing.T) {
 	var input map[string]interface{}
 	opa := opaReceiving(t, &input)
@@ -344,21 +345,19 @@ func TestSettingsOfTheServiceReachOpaNormalized(t *testing.T) {
 	rules := []interface{}{map[string]interface{}{
 		"name": "default", "priority": float64(3),
 		"paths": []interface{}{"/**"}, "methods": []interface{}{}, "public": false,
-		"scopes": []interface{}{map[string]interface{}{"name": "admin.cluster", "group": "default"}},
-		"any":    []interface{}{},
-		"missing": map[string]interface{}{
-			"action": "login",
-			"scope":  map[string]interface{}{"group": "default", "requireOtherGroupMembers": true},
+		"scopes": map[string]interface{}{
+			"required": []interface{}{"admin.cluster", "openid"},
+			"optional": []interface{}{"address", "email", "offline", "phone", "profile"},
 		},
+		"missing":          map[string]interface{}{"action": "login"},
+		"claimChecks":      nil,
+		"additionalChecks": []interface{}{},
 	}}
 	if !reflect.DeepEqual(input["rules"], rules) {
 		t.Fatalf("OPA received the rules %v, expected %v", input["rules"], rules)
 	}
-	groups := map[string]interface{}{"default": map[string]interface{}{
-		"scopes": []interface{}{"admin.cluster"}, "requireAllScopesForAnyMember": true,
-	}}
-	if !reflect.DeepEqual(input["groups"], groups) {
-		t.Fatalf("OPA received the groups %v, expected %v", input["groups"], groups)
+	if groups, sent := input["groups"]; sent {
+		t.Fatalf("OPA received groups, which are worked into the rules: %v", groups)
 	}
 }
 

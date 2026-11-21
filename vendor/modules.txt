@@ -1,4 +1,4 @@
-# github.com/compusib/compugo-oss/libs/traefik v0.2.0
+# github.com/compusib/compugo-oss/libs/traefik v0.3.0
 ## explicit; go 1.27
 github.com/compusib/compugo-oss/libs/traefik/policy
 github.com/compusib/compugo-oss/libs/traefik/settings

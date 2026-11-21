@@ -18,12 +18,19 @@ const envPrefix = "JWT_PLUGIN_"
 // of the decision), and a service's middleware holds the service's own settings alone.
 //
 //   - a text, a switch (true, false) and a number are the variable's value;
+//
 //   - a list is its value, separated by commas. It is kept aside and taken when the middleware is created, where
 //     the middleware writes none (listDefaults): laid over a default by Traefik, a shorter list would keep the
 //     default's last entries;
+//
 //   - a map has one variable per entry, JWT_PLUGIN_<SETTING>_<HEADER>: every map of this plugin is keyed by a
 //     header's name, written here in upper case with _ for its - (OPARESPONSEHEADERS_SET_COOKIE is Set-Cookie).
 //     An entry is a setting of its own: a middleware that writes one keeps the others.
+//
+//   - GroupDefaultScopes, the scopes of every group that writes none, are the one setting of the grammar a
+//     deployment gives: JWT_PLUGIN_GROUPDEFAULTSCOPES for scopes that are all required, or
+//     JWT_PLUGIN_GROUPDEFAULTSCOPES_REQUIRED and JWT_PLUGIN_GROUPDEFAULTSCOPES_OPTIONAL, each a list of scopes as
+//     the grammar writes one, separated by spaces. They are kept aside like a list.
 //
 // An empty variable is as one not set. A variable that names no such setting, or whose value is not of the setting's
 // kind, is an error: the middleware is not created. The settings of a service (Rules, Groups and a rule's fields)
@@ -36,6 +43,7 @@ func (config *Config) defaultsFromEnvironment(environ []string) error {
 		}
 	}
 	sort.Strings(entries) // of several errors the same one is reported at every start
+	plain, members := "", map[string]interface{}{}
 	for _, entry := range entries {
 		parts := strings.SplitN(entry, "=", 2)
 		if len(parts) != 2 || parts[1] == "" {
@@ -75,6 +83,12 @@ func (config *Config) defaultsFromEnvironment(environ []string) error {
 			config.defaultKeys = listOf(value)
 		case "PAYLOADFIELDS":
 			config.defaultPayloadFields = listOf(value)
+		case "GROUPDEFAULTSCOPES":
+			plain = value
+		case "GROUPDEFAULTSCOPES_REQUIRED":
+			members["required"] = value
+		case "GROUPDEFAULTSCOPES_OPTIONAL":
+			members["optional"] = value
 		default:
 			setting, header := mapEntry(name)
 			switch setting {
@@ -95,6 +109,14 @@ func (config *Config) defaultsFromEnvironment(environ []string) error {
 			// rule is the same for every variable.
 			return fmt.Errorf("%s is not of its setting's kind (true or false for a switch, digits for a number)", variable)
 		}
+	}
+	switch {
+	case plain != "" && len(members) > 0:
+		return fmt.Errorf("%sGROUPDEFAULTSCOPES is set beside its _REQUIRED or _OPTIONAL: the scopes are all required, or are given by the two", envPrefix)
+	case plain != "":
+		config.defaultGroupDefaultScopes = plain
+	case len(members) > 0:
+		config.defaultGroupDefaultScopes = members
 	}
 	return nil
 }

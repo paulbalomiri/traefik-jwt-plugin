@@ -139,17 +139,32 @@ type Config struct {
 	// free-form here: Traefik hands them over as written. The plugin
 	// normalizes them when the middleware is created, refuses to be created
 	// on what the grammar cannot read, and passes the one normalized form to
-	// OPA with every request, as input.rules and input.groups. What they
-	// mean is the policy's.
-	Rules    interface{}
-	Groups   interface{}
-	Paths    interface{}
-	Methods  interface{}
-	Public   interface{}
-	Scopes   interface{}
-	Any      interface{}
-	Missing  interface{}
-	Priority interface{}
+	// OPA with every request, as input.rules: the groups are worked into
+	// each rule's required and optional scopes. What they mean is the
+	// policy's.
+	Rules                   interface{}
+	Groups                  interface{}
+	Paths                   interface{}
+	Methods                 interface{}
+	Public                  interface{}
+	Group                   interface{}
+	Scopes                  interface{}
+	RequestOtherGroupScopes interface{}
+	Missing                 interface{}
+	Priority                interface{}
+	ClaimChecks             interface{}
+	AdditionalChecks        interface{}
+
+	// GroupDefaultScopes are the scopes of every group that writes none of
+	// its own. A deployment gives them once for all its middlewares, in
+	// Traefik's environment (defaultsFromEnvironment) or on each middleware;
+	// a service that writes them itself has its own.
+	GroupDefaultScopes interface{}
+
+	// Any is no setting any more. The field is kept so that a middleware
+	// that still writes it is refused by the grammar, as an unknown key:
+	// Traefik passes over a setting that a plugin has no field for.
+	Any interface{}
 
 	// Labels holds the settings of the service as the service's docker labels, the lines a compose file writes for
 	// its middleware of this plugin (settingsOfLabels). A cluster's Middleware takes them whole from the compose
@@ -158,9 +173,10 @@ type Config struct {
 
 	// What Traefik's environment gave no usable default with (defaultsFromEnvironment): the middleware is not
 	// created on it. And the lists the environment gives, for a middleware that writes none (listDefaults).
-	environmentError     error
-	defaultKeys          []string
-	defaultPayloadFields []string
+	environmentError          error
+	defaultKeys               []string
+	defaultPayloadFields      []string
+	defaultGroupDefaultScopes interface{}
 }
 
 // CreateConfig creates a new OPA Config: the plugin's defaults, and over them the defaults the deployment gives in
@@ -195,7 +211,6 @@ type JwtPlugin struct {
 	opaBodyField       string
 	opaClient          *http.Client
 	rules              []*policy.Rule
-	groups             map[string]*policy.Group
 
 	name         string
 	forceRefresh bool
@@ -268,18 +283,17 @@ type Keys struct {
 
 // PayloadInput is the input payload
 type PayloadInput struct {
-	Host       string                   `json:"host"`
-	Method     string                   `json:"method"`
-	Path       []string                 `json:"path"`
-	Parameters url.Values               `json:"parameters"`
-	Headers    map[string][]string      `json:"headers"`
-	JWTHeader  JwtHeader                `json:"tokenHeader"`
-	JWTPayload map[string]interface{}   `json:"tokenPayload"`
-	TokenError string                   `json:"tokenError,omitempty"`
-	Rules      []*policy.Rule           `json:"rules,omitempty"`
-	Groups     map[string]*policy.Group `json:"groups,omitempty"`
-	Body       interface{}              `json:"body,omitempty"`
-	Form       url.Values               `json:"form,omitempty"`
+	Host       string                 `json:"host"`
+	Method     string                 `json:"method"`
+	Path       []string               `json:"path"`
+	Parameters url.Values             `json:"parameters"`
+	Headers    map[string][]string    `json:"headers"`
+	JWTHeader  JwtHeader              `json:"tokenHeader"`
+	JWTPayload map[string]interface{} `json:"tokenPayload"`
+	TokenError string                 `json:"tokenError,omitempty"`
+	Rules      []*policy.Rule         `json:"rules,omitempty"`
+	Body       interface{}            `json:"body,omitempty"`
+	Form       url.Values             `json:"form,omitempty"`
 }
 
 // Payload for OPA requests
@@ -301,11 +315,14 @@ func New(ctx context.Context, next http.Handler, config *Config, pluginName stri
 	// A setting that is not written is nil, which the grammar reads as not written.
 	written := map[string]interface{}{
 		"Rules": config.Rules, "Groups": config.Groups,
-		"Paths": config.Paths, "Methods": config.Methods, "Public": config.Public, "Scopes": config.Scopes,
-		"Any": config.Any, "Missing": config.Missing, "Priority": config.Priority,
+		"Paths": config.Paths, "Methods": config.Methods, "Public": config.Public, "Group": config.Group,
+		"Scopes": config.Scopes, "RequestOtherGroupScopes": config.RequestOtherGroupScopes,
+		"Missing": config.Missing, "Priority": config.Priority,
+		"ClaimChecks": config.ClaimChecks, "AdditionalChecks": config.AdditionalChecks,
+		"Any": config.Any,
 	}
 	if config.Labels != nil {
-		for _, name := range serviceSettings {
+		for _, name := range sortedKeys(written) {
 			if written[name] != nil {
 				return nil, fmt.Errorf("the middleware writes %s beside Labels: with Labels the service's settings are its labels alone", name)
 			}
@@ -315,6 +332,14 @@ func New(ctx context.Context, next http.Handler, config *Config, pluginName stri
 			return nil, err
 		}
 		written = fromLabels
+	}
+	// The scopes of a group that writes none: the service's own where its labels give them, else the
+	// middleware's, else the environment's. One replaces the other whole.
+	if written[groupDefaultScopes] == nil {
+		written[groupDefaultScopes] = config.GroupDefaultScopes
+	}
+	if written[groupDefaultScopes] == nil {
+		written[groupDefaultScopes] = config.defaultGroupDefaultScopes
 	}
 	settings, err := policy.Normalize(written)
 	if err != nil {
@@ -341,7 +366,6 @@ func New(ctx context.Context, next http.Handler, config *Config, pluginName stri
 		opaDecidesToken:    config.OpaDecidesToken,
 		opaBodyField:       config.OpaBodyField,
 		rules:              settings.Rules,
-		groups:             settings.Groups,
 		opaClient:          &http.Client{Timeout: time.Duration(config.OpaTimeoutMs) * time.Millisecond},
 		name:               pluginName,
 		forceRefresh:       config.ForceRefreshKeys,
@@ -911,7 +935,6 @@ func (jwtPlugin *JwtPlugin) CheckOpa(request *http.Request, token *JWT, tokenErr
 	}
 	opaPayload.Input.TokenError = tokenError
 	opaPayload.Input.Rules = jwtPlugin.rules
-	opaPayload.Input.Groups = jwtPlugin.groups
 	authPayloadAsJSON, err := json.Marshal(opaPayload)
 	if err != nil {
 		return 0, err

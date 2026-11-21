@@ -16,8 +16,8 @@
 //     name is admin, and "Scopes.operator.name: admin.cluster" says otherwise.
 //   - G5: a bare true is the entry with its defaults; fields refine it.
 //   - G6: what has one candidate need not be named. This is the plugin's to apply, not this package's.
-//   - G7: a dot nests, everywhere, so a key has no dot: "scope.group: x" and "scope: {group: x}" are the same. A
-//     name with a dot is written as a value, or as an entry's field.
+//   - G7: a dot nests, everywhere, so a key has no dot: "Scopes.required: x" and "Scopes: {required: x}" are the
+//     same. A name with a dot is written as a value, or as an entry's field.
 //   - G8: keys are read without regard to case; values are text, read as what the setting expects ("true", "10").
 //     A boolean is read as Traefik reads a label's, which is strconv.ParseBool: 1, t, T, true, True, TRUE and
 //     0, f, F, false, False, FALSE.
@@ -66,6 +66,11 @@ type Field struct {
 	Default any
 	// Of describes the fields of Entries and of an Object.
 	Of *Type
+	// Members split Entries into lists of their own, each written under its member's name and in every form
+	// entries are written in: "Scopes.required: a" and "Scopes.optional: b c". Entries written without a member
+	// are the first member's. A member is a key and never an entry's name: an entry so named is written as a
+	// value, or by its Key. Such a field is read with Entry.Member.
+	Members []string
 }
 
 // Type describes entries: a plugin's settings as a whole, or the entries of one of its settings.
@@ -123,6 +128,12 @@ func (e *Entry) List(field string) []string {
 func (e *Entry) Entries(field string) []*Entry {
 	v, _ := e.values[field].([]*Entry)
 	return v
+}
+
+// Member is the entries of one member of an Entries field that has Members, and nil where there are none.
+func (e *Entry) Member(field, member string) []*Entry {
+	v, _ := e.values[field].(map[string][]*Entry)
+	return v[member]
 }
 
 // Object is the fields of an Object field, and nil where there is none.
@@ -211,17 +222,29 @@ func (t *Type) fieldNames() string {
 	return strings.Join(names, ", ")
 }
 
-// unknown is the refusal of a key the type has no field for. Under a type with a Key, a key that holds true or
-// further keys is most likely the rest of a name with a dot (G7), and the error says how such a name is written.
+// unknown is the refusal of a key the type has no field for. Under a type with a Key, a key that leads to a true
+// is most likely the rest of a name with a dot (G7), and the error says how such a name is written.
 func (t *Type) unknown(path, key string, v any) error {
 	msg := fmt.Sprintf("unknown key %q (%s has %s)", key, t.What, t.fieldNames())
-	if t.Key != "" {
-		_, nested := v.(map[string]any)
-		if nested || isTrue(v) {
-			msg += "; a name with a dot is a value, or an entry's " + t.Key
-		}
+	if t.Key != "" && leadsToTrue(v) {
+		msg += "; a name with a dot is a value, or an entry's " + t.Key
 	}
 	return Errorf(path, "%s", msg)
+}
+
+// leadsToTrue says whether v is a true, or keys of which one leads to a true: what is left of a name with dots
+// that was written as a key ("admin.cluster: true").
+func leadsToTrue(v any) bool {
+	m, nested := v.(map[string]any)
+	if !nested {
+		return isTrue(v)
+	}
+	for _, sub := range m {
+		if leadsToTrue(sub) {
+			return true
+		}
+	}
+	return false
 }
 
 func defaultOf(f *Field, path string) (any, error) {
@@ -234,6 +257,9 @@ func defaultOf(f *Field, path string) (any, error) {
 	case List:
 		return []string{}, nil
 	case Entries:
+		if len(f.Members) > 0 {
+			return map[string][]*Entry{}, nil
+		}
 		return []*Entry{}, nil
 	}
 	return nil, nil
@@ -259,6 +285,12 @@ func readField(f *Field, path string, v any) (any, error) {
 		list, err = readList(f, path, v)
 		value = list
 	case Entries:
+		if len(f.Members) > 0 {
+			var members map[string][]*Entry
+			members, err = readMembers(f, path, v)
+			value = members
+			break
+		}
 		var entries []*Entry
 		entries, err = readEntries(f, path, v)
 		value = entries
@@ -532,6 +564,49 @@ func readEntries(f *Field, path string, v any) ([]*Entry, error) {
 	return entries, nil
 }
 
+// readMembers reads Entries that have Members: an object whose keys are members, each holding entries in any of
+// their forms, or entries written without a member, which are the first member's.
+func readMembers(f *Field, path string, v any) (map[string][]*Entry, error) {
+	members := map[string][]*Entry{}
+	written, named := map[string]any{f.Members[0]: v}, false
+	if raw, isMap := v.(map[string]any); isMap {
+		m, keys, err := expand(path, raw)
+		if err != nil {
+			return nil, err
+		}
+		under := map[string]any{}
+		for _, key := range keys {
+			for _, member := range f.Members {
+				if strings.EqualFold(key, member) {
+					under[member] = m[key]
+				}
+			}
+		}
+		if len(under) > 0 {
+			if len(under) < len(keys) {
+				return nil, Errorf(path, "%s cannot be mixed with other entries", strings.Join(f.Members, " and "))
+			}
+			written, named = under, true
+		}
+	}
+	for _, member := range f.Members {
+		value, ok := written[member]
+		if !ok {
+			continue
+		}
+		at := path
+		if named {
+			at = Join(path, member)
+		}
+		entries, err := readEntries(f, at, value)
+		if err != nil {
+			return nil, err
+		}
+		members[member] = entries
+	}
+	return members, nil
+}
+
 // valueEntry is the entry a value of a list stands for: the one with that name and its defaults (G4).
 func valueEntry(t *Type, path string, v any) (*Entry, error) {
 	text, err := readText(path, v)
@@ -547,7 +622,7 @@ func valueEntry(t *Type, path string, v any) (*Entry, error) {
 	return readEntry(t, text, path, false, map[string]any{})
 }
 
-// expand makes a map's keys plain (G7): a key with a dot nests, so "scope.group: x" becomes "scope: {group: x}",
+// expand makes a map's keys plain (G7): a key with a dot nests, so "Scopes.required: x" becomes "Scopes: {required: x}",
 // one part at a time. It returns the map and its keys in alphabetical order, leaves out what holds nothing, and
 // refuses keys that differ only by case: Traefik reads those as one (G8).
 func expand(path string, raw map[string]any) (map[string]any, []string, error) {
