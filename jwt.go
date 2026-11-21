@@ -151,6 +151,11 @@ type Config struct {
 	Missing  interface{}
 	Priority interface{}
 
+	// Labels holds the settings of the service as the service's docker labels, the lines a compose file writes for
+	// its middleware of this plugin (settingsOfLabels). A cluster's Middleware takes them whole from the compose
+	// definition of the service. With Labels a middleware writes none of the settings above itself.
+	Labels interface{}
+
 	// What Traefik's environment gave no usable default with (defaultsFromEnvironment): the middleware is not
 	// created on it. And the lists the environment gives, for a middleware that writes none (listDefaults).
 	environmentError     error
@@ -294,11 +299,24 @@ func New(ctx context.Context, next http.Handler, config *Config, pluginName stri
 	}
 	config.listDefaults()
 	// A setting that is not written is nil, which the grammar reads as not written.
-	settings, err := policy.Normalize(map[string]interface{}{
+	written := map[string]interface{}{
 		"Rules": config.Rules, "Groups": config.Groups,
 		"Paths": config.Paths, "Methods": config.Methods, "Public": config.Public, "Scopes": config.Scopes,
 		"Any": config.Any, "Missing": config.Missing, "Priority": config.Priority,
-	})
+	}
+	if config.Labels != nil {
+		for _, name := range serviceSettings {
+			if written[name] != nil {
+				return nil, fmt.Errorf("the middleware writes %s beside Labels: with Labels the service's settings are its labels alone", name)
+			}
+		}
+		fromLabels, err := settingsOfLabels(config.Labels)
+		if err != nil {
+			return nil, err
+		}
+		written = fromLabels
+	}
+	settings, err := policy.Normalize(written)
 	if err != nil {
 		return nil, err
 	}

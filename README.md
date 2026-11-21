@@ -69,6 +69,7 @@ OpaBodyField | Field in OPA JSON result which contains the body of the response 
 OpaDecidesToken | Boolean. A token that fails its checks (signature, expiry, required fields, audience) is not refused by the plugin: the request reaches OPA without `tokenPayload` and with the reason as `tokenError`, and OPA answers. Needs `OpaUrl`. Default `false`.
 OpaTimeoutMs | Timeout in milliseconds for the request to OPA. Default `0` (no timeout). A request that gets no decision from OPA — no answer in time, OPA unreachable, a result without `OpaAllowField` — is answered `503`.
 Rules, Groups | The settings of the service this middleware is on: its rules and its scope groups, written in compusib's grammar for a plugin's settings (`github.com/compusib/compugo-oss/libs/traefik`). A service with one rule writes that rule's fields at the top instead: `Paths`, `Methods`, `Public`, `Scopes`, `Any`, `Missing`, `Priority`. The plugin normalizes them when the middleware is created, logs the normalized form, and is not created on what the grammar cannot read. It passes the normalized form to OPA with every request as `input.rules` and `input.groups`; what they mean is the policy's.
+Labels | The settings of the service as the service's docker labels, the lines a compose file writes for its middleware of this plugin: a map of label to value. See [The service's labels as one setting](#the-services-labels-as-one-setting). With `Labels` a middleware writes none of `Rules`, `Groups` and a rule's fields itself.
 JwtCookieKey | (Deprecated, use JwtSources)Name of the cookie to extract JWT if not found in `Authorization` header.
 JwtQueryKey | (Deprecated, use JwtSources) Name of the query parameter to extract JWT if not found in `Authorization` header or in the specified cookie.
 JwtSources | Ordered List of sources [bearer, header, query, cookie] of the JWT. config format is a list of maps e.g. [{type: bearer, key: Authorization}, {type: query, key, jwt}]
@@ -114,6 +115,37 @@ JWT_PLUGIN_OPARESPONSEHEADERS_LOCATION: location
 traefik.http.middlewares.docs-policy.plugin.jwt.Scopes: stack.docs.view
 traefik.http.middlewares.docs-policy.plugin.jwt.Missing: login
 ```
+
+### The service's labels as one setting
+
+A service that runs in docker and on a cluster writes what it requires once, as the labels of its compose
+definition. Compose reads them as labels of the container. A cluster's Middleware takes the same lines whole, as
+`Labels`:
+
+```yaml
+# compose: the service's labels
+traefik.http.middlewares.docs-policy.plugin.jwt.Scopes: stack.docs.view
+traefik.http.middlewares.docs-policy.plugin.jwt.Missing: login
+```
+
+```yaml
+# a cluster: the Middleware of the same service
+spec:
+  plugin:
+    jwt:
+      Labels:
+        traefik.http.middlewares.docs-policy.plugin.jwt.Scopes: stack.docs.view
+        traefik.http.middlewares.docs-policy.plugin.jwt.Missing: login
+```
+
+- The keys are read by Traefik's own code for a container's labels (`paerser/`, copied from
+  `github.com/traefik/paerser`), so the settings are the ones Traefik hands the plugin in docker: a list for indexed
+  entries, a map for named ones, every value a text.
+- The lines are those of one middleware's plugin, whatever the two are named. A label of anything else, a router's
+  or a service's, is passed over.
+- A value that is a switch or a number in the object is the text compose makes of it.
+- A line that sets anything but a service's settings is an error, and so is `Labels` beside one of those settings
+  written on the middleware: the middleware is not created.
 
 ### Example configuration
 
